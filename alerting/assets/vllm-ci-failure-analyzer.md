@@ -34,16 +34,19 @@ clone, push, or pull-request mechanics. The prohibition above wins.
 
 1. Split failed jobs into soft failures (`state == "failed"` and
    `soft_failed == true`) and hard failures (`state == "failed"` and not soft).
-2. The next baseline is exactly this run's hard failures. Nothing carries
-   forward: a name that is not a hard failure this run leaves the baseline.
+2. The next baseline is this run's hard failures, plus any baseline name whose
+   job is in this build but has not reached a verdict yet (`scheduled`,
+   `running`, and the like). Everything else leaves the baseline — including
+   names whose job no longer exists, which is how renamed and retired jobs
+   stop accumulating.
 3. New failures are hard-failure names absent from
    `previous_failures.failed_tests`.
 4. Recurring failures are hard-failure names present in that baseline.
-5. Fixed tests are baseline names that are neither a hard nor a soft failure
-   this run — `previous - hard - soft`. A missing or unfinished job is fixed
-   by that rule; this is deliberate, because a renamed or retired job name can
-   never be observed passing and would otherwise sit in the baseline forever.
-   Never derive the count yourself: it is `stats.fixed`.
+5. Fixed tests are baseline names that are neither a hard failure, a soft
+   failure, nor still awaiting a verdict this run. A job that has vanished is
+   fixed; a job that simply has not finished is not, because calling it fixed
+   drops it from the baseline and it returns as a phantom new failure on the
+   next run. Never derive the count yourself: it is `stats.fixed`.
 6. Jobs in state `waiting_failed`, `timed_out`, or `canceled` are neither hard
    nor soft failures and never enter the baseline. `waiting_failed` means an
    upstream step (usually an image build) failed and the job never ran — a
@@ -83,25 +86,45 @@ Write `.logs/ci_report.txt` as Slack mrkdwn, without posting it. Start with:
 
 Every number on the Stats line comes from the summary's precomputed `stats`
 object: X = `stats.passed`, Y = `stats.failed` (hard failures only). Never count
-the `jobs` array yourself — it is too long to count reliably. The
+the `jobs` array yourself — it is too long to count reliably, and the adapter
+overwrites this line with the computed counts before posting, so a number you
+invent here is discarded rather than published. The
 `(N new, M recurring)` breakdown uses `stats.new` and `stats.recurring`, the
 fixed section's count is `stats.fixed`, and
 appears only when `stats.failed` > 0 and `stats.has_previous_data` is true;
 otherwise show just `Y failed`. If `stats.scheduled` > 0, append
-`, S scheduled` to the Stats line using `stats.scheduled`. Add sections for new, recurring, fixed,
-and soft failures when present. Also add these sections when their jobs exist:
+`, S scheduled` to the Stats line using `stats.scheduled`.
+
+Then add each section below that has entries, in this order, with the heading
+written exactly as shown — the wording and the emoji are part of the report's
+identity and the adapter rewrites anything else back to these:
+
+```text
+*🆕 New failures (N):*
+*🔁 Recurring failures (M):*
+*✅ Fixed since last run (K):*
+*⚠️ Soft failures — warning only (S):*
+```
+
+Also add these sections when their jobs exist:
 
 - If `stats.cascaded` > 0, after the fixed section add
-  `*:hourglass_flowing_sand: Cascaded, never ran (N):*` with N =
+  `*⏳ Cascaded, never ran (N):*` with N =
   `stats.cascaded`, listing each `waiting_failed` job with a short reason.
   These jobs have no log; identify the blocker from `nightly_full.json` (a
   failed image-build step on the same queue) and write e.g.
   `• Arm CPU Test Shard 1/2/3 — blocked by CPU arm64 image`, grouping shards
   that share one blocker into a single bullet. N counts jobs, not bullets.
 - If `stats.timed_out` + `stats.canceled` > 0, add
-  `*:stopwatch: Timed out / cancelled (N):*` with N = `stats.timed_out` +
+  `*⏱️ Timed out / cancelled (N):*` with N = `stats.timed_out` +
   `stats.canceled`, listing each `timed_out` or `canceled` job with a short
   reason when known (e.g. `— cancelled, never ran a test`).
+
+Close the report with a `Notes:` line whenever there is something the on-call
+should know that no section carries: several failures sharing one root cause, a
+fixed list that is provisional because the build is still running, or why no
+revert was filed. At most two short lines and 240 characters; omit it entirely
+when the sections already say everything.
 
 Investigation summaries must be concise. Show
 at most five bullets per section and link to the build for omitted entries.
@@ -113,9 +136,10 @@ link labels or backticks render as literal text in Slack.
 ## Phase D — Update outputs
 
 Write `.logs/failed_tests_cache.json` with current `build_number`, current
-`commit`, and a sorted unique `failed_tests` list containing exactly this run's
-hard failures (new + recurring). Do not include soft failures and do not carry
-any prior failure forward. Verify all three output files exist and contain
+`commit`, and a sorted unique `failed_tests` list containing this run's hard
+failures (new + recurring) plus any baseline name still awaiting a verdict in
+this build. Do not include soft failures, and do not carry forward a baseline
+name whose job is absent from this build. Verify all three output files exist and contain
 valid data:
 
 - `.logs/ci_report.txt`
